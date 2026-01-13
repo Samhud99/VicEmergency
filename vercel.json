@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/*.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/warnings",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/api/postcodes",
+      "dest": "/api/postcodes.py"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/warnings",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
