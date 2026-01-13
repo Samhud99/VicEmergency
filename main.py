@@ -98,13 +98,21 @@ def main():
     monitor = VicEmergencyMonitor()
 
     # Handle graceful shutdown
+    # Note: Signal handlers don't work in Streamlit Cloud and some other environments
     def signal_handler(sig, frame):
         print("\nShutting down...")
         monitor.close()
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # Try to set up signal handlers, but fail gracefully if not available
+    # (e.g., in Streamlit Cloud, serverless environments, or Windows)
+    try:
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    except (ValueError, OSError, AttributeError):
+        # Signal handlers may not be available in some environments
+        # This is expected in Streamlit Cloud and other serverless platforms
+        pass
 
     if args.schedule:
         print(f"Starting VIC Emergency Monitor (polling every {args.interval} seconds)")
@@ -127,3 +135,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 
