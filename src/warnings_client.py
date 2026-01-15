@@ -40,7 +40,7 @@ class WarningsClient:
         })
 
     def fetch_warnings(self) -> List[Warning]:
-        """Fetch all current warnings"""
+        """Fetch ALL current incidents and warnings (not just formal warnings)"""
         try:
             response = self.session.get(self.TEXT_ONLY_URL, timeout=self.timeout)
             response.raise_for_status()
@@ -48,17 +48,29 @@ class WarningsClient:
             soup = BeautifulSoup(response.text, "html.parser")
             warnings = []
 
-            # Find all warning rows
-            rows = soup.find_all("tr", class_="warning")
-
-            for row in rows:
-                try:
-                    warning = self._parse_warning_row(row)
-                    if warning:
-                        warnings.append(warning)
-                except Exception as e:
-                    print(f"Error parsing warning row: {e}")
-                    continue
+            # Find ALL incident/warning rows - not just class="warning"
+            # The text-only page has different classes for different incident types
+            # Look for all table rows that have incident data (data-href attribute or links)
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows:
+                    # Skip header rows and empty rows
+                    if row.find("th"):
+                        continue
+                    cells = row.find_all("td")
+                    if len(cells) < 3:
+                        continue
+                    # Check if this row has incident data (has a link in first cell)
+                    first_cell = cells[0]
+                    if first_cell.find("a"):
+                        try:
+                            warning = self._parse_warning_row(row)
+                            if warning:
+                                warnings.append(warning)
+                        except Exception as e:
+                            print(f"Error parsing row: {e}")
+                            continue
 
             return warnings
 
@@ -67,15 +79,15 @@ class WarningsClient:
             return []
 
     def _parse_warning_row(self, row) -> Optional[Warning]:
-        """Parse a warning table row"""
+        """Parse a warning/incident table row - handles various row structures"""
         cells = row.find_all("td")
-        if len(cells) < 4:
+        if len(cells) < 3:
             return None
 
-        # Get warning ID from data-href
-        warning_id = row.get("data-href", "").replace("#/warning/", "")
+        # Get warning ID from data-href or generate from content
+        warning_id = row.get("data-href", "").replace("#/warning/", "").replace("#/incident/", "")
 
-        # Parse type cell
+        # Parse type cell (first cell with a link)
         type_cell = cells[0]
         link = type_cell.find("a")
         if not link:
@@ -84,24 +96,37 @@ class WarningsClient:
         type_text = link.get_text(strip=True)
         url = link.get("href", "")
 
+        # Generate ID if not found
+        if not warning_id:
+            warning_id = url.split("/")[-1] if "/" in url else type_text[:20]
+
         # Parse warning level, category, and condition
         warning_level, category, condition = self._parse_type(type_text)
 
-        # Parse status (Moderate, Minor, etc.)
-        status = cells[1].get_text(strip=True)
+        # Parse status (second cell) - handle various formats
+        status = cells[1].get_text(strip=True) if len(cells) > 1 else "Unknown"
 
-        # Parse location
-        location_span = cells[2].find("span", class_="lastLocation")
-        location = location_span.get_text(strip=True) if location_span else ""
+        # Parse location - try span.lastLocation first, then just text content
+        location = ""
+        if len(cells) > 2:
+            location_span = cells[2].find("span", class_="lastLocation")
+            if location_span:
+                location = location_span.get_text(strip=True)
+            else:
+                location = cells[2].get_text(strip=True)
         suburbs = self._parse_suburbs(location)
 
-        # Parse last updated
-        updated_span = cells[3].find("span", class_="lastUpdated")
-        if updated_span:
-            timestamp_ms = int(updated_span.get_text(strip=True))
-            last_updated = datetime.fromtimestamp(timestamp_ms / 1000)
-        else:
-            last_updated = datetime.now()
+        # Parse last updated - try span.lastUpdated, or look in later cells
+        last_updated = datetime.now()
+        for cell in cells[3:] if len(cells) > 3 else []:
+            updated_span = cell.find("span", class_="lastUpdated")
+            if updated_span:
+                try:
+                    timestamp_ms = int(updated_span.get_text(strip=True))
+                    last_updated = datetime.fromtimestamp(timestamp_ms / 1000)
+                    break
+                except (ValueError, TypeError):
+                    pass
 
         return Warning(
             warning_id=warning_id,
@@ -113,7 +138,7 @@ class WarningsClient:
             location=location,
             suburbs=suburbs,
             last_updated=last_updated,
-            url=f"https://emergency.vic.gov.au{url}" if url else "",
+            url=f"https://emergency.vic.gov.au{url}" if url and not url.startswith("http") else url,
         )
 
     def _parse_type(self, type_text: str) -> tuple:

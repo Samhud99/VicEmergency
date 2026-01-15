@@ -10,6 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, timedelta
 
 from src.warnings_client import WarningsClient
+from src.api_client import VicEmergencyClient
 from src.geocoder import PostcodeGeocoder
 from src.history_tracker import HistoryTracker
 from src.download_log import DownloadLog
@@ -52,10 +53,25 @@ def get_download_log():
     return _download_log
 
 
-# Constants
-STATUS_OPTIONS = ["Moderate", "Minor", "Unknown"]
-WARNING_LEVELS = ["Emergency Warning", "Watch and Act", "Advice"]
-CATEGORIES = ["Bushfire", "Flood", "Wind/Storm", "Earthquake", "Extreme Heat", "Health", "Other"]
+# Constants - ordered by severity (most severe first)
+STATUS_OPTIONS = [
+    "Extreme", "Moderate", "Minor",  # Warning statuses
+    "Not Yet Under Control", "Going", "Responding", "On Scene",  # Active incident statuses
+    "Request For Assistance", "Contained", "Under Control", "Controlled",  # Controlled statuses
+    "Safe", "Complete", "Not Declared", "Unknown"  # Resolved/other statuses
+]
+WARNING_LEVELS = [
+    "Emergency Warning", "Watch and Act", "Advice",  # Formal warning levels
+    "Community Update",  # Community updates
+    "Flooding", "Fire", "Rescue", "Accident / Rescue",  # Incident types as levels
+    "Building Damage", "Tree Down", "Other", "Incident"  # Other incident types
+]
+CATEGORIES = [
+    "Bushfire", "Flood", "Flooding", "Weather", "Met", "Wind/Storm",  # Weather/fire/flood
+    "Earthquake", "Extreme Heat", "Health",  # Natural hazards
+    "Medical", "Rescue", "Accident",  # Emergency services
+    "Hazmat", "Transport", "Building", "Tree Down", "Animal", "Other"  # Other
+]
 CHANGE_TYPES = ["New Warning", "Escalated", "De-escalated", "Removed", "No Change"]
 
 # Change type colors - readable
@@ -84,6 +100,15 @@ def fetch_warnings():
     return warnings
 
 
+@st.cache_data(ttl=300)
+def fetch_all_incidents():
+    """Fetch ALL incidents from the VIC Emergency API (not just warnings)"""
+    client = VicEmergencyClient()
+    incidents = client.fetch_incidents()
+    client.close()
+    return incidents
+
+
 @st.cache_data(ttl=3600)
 def resolve_postcode(suburb: str) -> str:
     geocoder = get_geocoder()
@@ -92,9 +117,63 @@ def resolve_postcode(suburb: str) -> str:
 
 
 def get_category(cat: str) -> str:
-    mapping = {"Fire": "Bushfire", "Flood": "Flood", "Storm": "Wind/Storm", "Heat": "Extreme Heat", "Health": "Health"}
+    """Map raw category to display category - handles all incident types"""
+    if not cat:
+        return "Other"
+    cat_lower = cat.lower()
+    mapping = {
+        # Fire types
+        "fire": "Bushfire",
+        "bushfire": "Bushfire",
+        "grass fire": "Bushfire",
+        "building fire": "Bushfire",
+        # Flood
+        "flood": "Flood",
+        "flooding": "Flood",
+        # Weather/Met
+        "met": "Weather",
+        "meteorological": "Weather",
+        "thunderstorm": "Weather",
+        "gale": "Weather",
+        "strong wind": "Wind/Storm",
+        "storm": "Wind/Storm",
+        "wind": "Wind/Storm",
+        # Tree down
+        "tree": "Tree Down",
+        "tree down": "Tree Down",
+        # Heat
+        "heat": "Extreme Heat",
+        "extreme heat": "Extreme Heat",
+        # Health
+        "health": "Health",
+        "air quality": "Health",
+        "water": "Health",
+        # Medical
+        "medical": "Medical",
+        # Rescue
+        "rescue": "Rescue",
+        "persons trapped": "Rescue",
+        "road trap": "Rescue",
+        # Accident
+        "accident": "Accident",
+        # Hazmat
+        "hazmat": "Hazmat",
+        "hazardous": "Hazmat",
+        # Transport
+        "transport": "Transport",
+        "vehicle": "Transport",
+        "traffic": "Transport",
+        # Building damage
+        "building damage": "Building",
+        "building": "Building",
+        "structure": "Building",
+        # Animal
+        "animal": "Animal",
+        # Earthquake
+        "earthquake": "Earthquake",
+    }
     for k, v in mapping.items():
-        if k.lower() in cat.lower():
+        if k in cat_lower:
             return v
     return "Other"
 
@@ -121,8 +200,84 @@ def build_dataframe(warnings) -> pd.DataFrame:
             "Postcodes": list(postcodes),
             "PostcodesStr": ", ".join(sorted(postcodes)) if postcodes else "Unknown",
             "Update Time": w.last_updated,
+            "Source": "Warning",
+            "Latitude": None,
+            "Longitude": None,
         })
     return pd.DataFrame(data)
+
+
+def build_incidents_dataframe(incidents) -> pd.DataFrame:
+    """Build dataframe from ALL incidents (from the JSON API)"""
+    data = []
+    geocoder = get_geocoder()
+
+    for inc in incidents:
+        # Try to resolve postcode from municipality/location
+        postcodes = set()
+        location_parts = [inc.municipality, inc.location, inc.name]
+        for part in location_parts:
+            if part:
+                for word in part.replace(",", " ").split():
+                    pc = resolve_postcode(word.strip().upper())
+                    if pc != "Unknown":
+                        postcodes.add(pc)
+
+        # Use category2 as main category, fallback to category1 or incident_type
+        raw_category = inc.category2 or inc.category1 or inc.incident_type
+
+        # Map incident status to a display status
+        status = inc.incident_status or inc.origin_status or "Unknown"
+
+        # Parse update time
+        try:
+            update_time = datetime.strptime(inc.last_update, "%Y-%m-%dT%H:%M:%S") if inc.last_update else datetime.now()
+        except:
+            update_time = datetime.now()
+
+        data.append({
+            "ID": str(inc.incident_no),
+            "Warning Level": "Incident",  # These are incidents, not formal warnings
+            "Status": status,
+            "Category": get_category(raw_category),
+            "RawCategory": raw_category,
+            "Condition": inc.incident_size or "",
+            "Type": f"{inc.incident_status} - {raw_category} - {inc.origin_status}",
+            "Location": inc.location or inc.municipality,
+            "Suburbs": [inc.municipality] if inc.municipality else [],
+            "Postcodes": list(postcodes),
+            "PostcodesStr": ", ".join(sorted(postcodes)) if postcodes else "Unknown",
+            "Update Time": update_time,
+            "Source": "Incident",
+            "Latitude": inc.latitude,
+            "Longitude": inc.longitude,
+        })
+    return pd.DataFrame(data)
+
+
+def merge_warnings_and_incidents(warnings_df: pd.DataFrame, incidents_df: pd.DataFrame) -> pd.DataFrame:
+    """Merge warnings and incidents, avoiding duplicates where possible"""
+    if warnings_df is None or warnings_df.empty:
+        return incidents_df if incidents_df is not None else pd.DataFrame()
+    if incidents_df is None or incidents_df.empty:
+        return warnings_df
+
+    # Ensure both dataframes have the same columns before concatenation
+    all_columns = list(set(warnings_df.columns.tolist() + incidents_df.columns.tolist()))
+    for col in all_columns:
+        if col not in warnings_df.columns:
+            warnings_df[col] = None
+        if col not in incidents_df.columns:
+            incidents_df[col] = None
+
+    # Combine both dataframes
+    combined = pd.concat([warnings_df, incidents_df], ignore_index=True)
+
+    # Remove duplicates based on location similarity (keep warnings over incidents if both exist)
+    combined = combined.sort_values("Source", ascending=True)  # "Incident" before "Warning"
+    combined = combined.drop_duplicates(subset=["Location", "Category"], keep="last")
+
+    return combined.sort_values("Update Time", ascending=False)
 
 
 def expand_by_postcode(df: pd.DataFrame) -> pd.DataFrame:
@@ -144,10 +299,74 @@ def expand_by_postcode(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_status_order(s): return {"Moderate": 1, "Minor": 2}.get(s, 3)
-def get_level_order(l): return {"Emergency Warning": 1, "Watch and Act": 2, "Advice": 3}.get(l, 4)
-def status_emoji(s): return {"Moderate": "🟠", "Minor": "🟡"}.get(s, "⚪")
-def level_emoji(l): return {"Emergency Warning": "🔴", "Watch and Act": "🟠", "Advice": "🟡"}.get(l, "⚪")
+# Severity ordering - lower number = more severe
+def get_status_order(s):
+    """Get severity order for status - lower = more severe"""
+    severity_map = {
+        "Extreme": 1,
+        "Moderate": 2,
+        "Minor": 3,
+        "Not Yet Under Control": 4,
+        "Going": 5,
+        "Responding": 6,
+        "On Scene": 7,
+        "Request For Assistance": 8,
+        "Contained": 9,
+        "Under Control": 10,
+        "Controlled": 11,
+        "Safe": 12,
+        "Complete": 13,
+        "Not Declared": 14,
+        "Unknown": 15,
+    }
+    return severity_map.get(s, 99)
+
+
+def get_level_order(l):
+    """Get severity order for warning level - lower = more severe"""
+    severity_map = {
+        "Emergency Warning": 1,
+        "Watch and Act": 2,
+        "Advice": 3,
+        "Flooding": 4,
+        "Fire": 5,
+        "Rescue": 6,
+        "Accident / Rescue": 7,
+        "Community Update": 8,
+        "Building Damage": 9,
+        "Tree Down": 10,
+        "Other": 11,
+        "Incident": 12,
+    }
+    return severity_map.get(l, 99)
+
+
+def status_emoji(s):
+    """Get emoji for status"""
+    emoji_map = {
+        "Extreme": "🔴",
+        "Moderate": "🟠",
+        "Minor": "🟡",
+        "Not Yet Under Control": "🔴",
+        "Going": "🟠",
+        "Responding": "🟠",
+        "On Scene": "🟡",
+        "Request For Assistance": "🟡",
+    }
+    return emoji_map.get(s, "⚪")
+
+
+def level_emoji(l):
+    """Get emoji for warning level"""
+    emoji_map = {
+        "Emergency Warning": "🔴",
+        "Watch and Act": "🟠",
+        "Advice": "🟡",
+        "Flooding": "🔵",
+        "Fire": "🔴",
+        "Rescue": "🟣",
+    }
+    return emoji_map.get(l, "⚪")
 
 
 def compare_with_uploaded(current_df: pd.DataFrame, uploaded_df: pd.DataFrame, end_time: datetime) -> pd.DataFrame:
@@ -310,33 +529,105 @@ def style_changes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_map(df, geocoder):
+    """Create map with ALL incidents - especially Emergency Warnings"""
+    import math
     vic_map = folium.Map(location=[-37.0, 145.0], zoom_start=7, tiles="cartodbpositron")
+
+    markers_added = 0
+
     for _, row in df.iterrows():
-        for suburb in row["Suburbs"][:10]:
-            pc = resolve_postcode(suburb)
-            if pc != "Unknown":
-                coords = geocoder.db._postcode_coords.get(pc)
-                if coords:
-                    color = {"Moderate": "orange", "Minor": "yellow"}.get(row["Status"], "gray")
-                    folium.CircleMarker(
-                        location=list(coords),
-                        radius=8, color=color, fill=True, fill_color=color, fill_opacity=0.7,
-                        tooltip=f"{suburb} - {row['Warning Level']}",
-                    ).add_to(vic_map)
+        coords = None
+        label = row.get("Location", "Unknown")
+        warning_level = row.get("Warning Level", "")
+        status = row.get("Status", "")
+
+        # Try to use direct coordinates from incidents (API data)
+        lat = row.get("Latitude")
+        lng = row.get("Longitude")
+        try:
+            if lat is not None and lng is not None:
+                lat_f = float(lat)
+                lng_f = float(lng)
+                if not math.isnan(lat_f) and not math.isnan(lng_f) and lat_f != 0 and lng_f != 0:
+                    coords = (lat_f, lng_f)
+        except (ValueError, TypeError):
+            pass
+
+        # Fall back to postcode lookup for warnings (scraped data)
+        if coords is None:
+            suburbs = row.get("Suburbs", [])
+            # Handle case where Suburbs might be a string or None
+            if suburbs is None:
+                suburbs = []
+            elif isinstance(suburbs, str):
+                suburbs = [s.strip() for s in suburbs.split(",")]
+
+            if isinstance(suburbs, list) and len(suburbs) > 0:
+                for suburb in suburbs[:10]:
+                    if not suburb:
+                        continue
+                    pc = resolve_postcode(suburb)
+                    if pc and pc != "Unknown":
+                        # Use the geocoder's coordinate lookup
+                        pc_coords = geocoder.db._postcode_coords.get(pc)
+                        if pc_coords:
+                            coords = pc_coords
+                            label = suburb
+                            break
+
+        # Add marker if we have coordinates
+        if coords:
+            # Color based on warning level and status - Emergency Warnings are RED
+            if warning_level == "Emergency Warning":
+                color = "red"
+                radius = 12  # Larger for emergency warnings
+            elif warning_level in ["Watch and Act"] or status in ["Extreme", "Moderate"]:
+                color = "orange"
+                radius = 10
+            elif warning_level == "Advice" or status == "Minor":
+                color = "yellow"
+                radius = 8
+            elif "Flood" in warning_level or "Flood" in str(row.get("Category", "")):
+                color = "blue"
+                radius = 10
+            else:
+                color = "gray"
+                radius = 6
+
+            folium.CircleMarker(
+                location=list(coords) if isinstance(coords, tuple) else coords,
+                radius=radius,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.7,
+                tooltip=f"{level_emoji(warning_level)} {label} - {row.get('Category', 'Unknown')} ({warning_level}) - {status}",
+            ).add_to(vic_map)
+            markers_added += 1
+
     return vic_map
 
 
 def main():
-    st.title("🚨 VIC Emergency Warnings")
+    st.title("🚨 VIC Emergency - All Incidents & Warnings")
 
-    with st.spinner("Fetching warnings..."):
+    with st.spinner("Fetching all incidents and warnings..."):
+        # Fetch formal warnings from text-only page
         warnings = fetch_warnings()
+        # Fetch ALL incidents from the JSON API
+        incidents = fetch_all_incidents()
 
-    if not warnings:
-        st.warning("No warnings found.")
+    # Build dataframes
+    warnings_df = build_dataframe(warnings) if warnings else pd.DataFrame()
+    incidents_df = build_incidents_dataframe(incidents) if incidents else pd.DataFrame()
+
+    # Merge both sources
+    df = merge_warnings_and_incidents(warnings_df, incidents_df)
+
+    if df.empty:
+        st.warning("No incidents or warnings found.")
         return
 
-    df = build_dataframe(warnings)
     history = get_history()
     geocoder = get_geocoder()
     download_log = get_download_log()
@@ -346,47 +637,67 @@ def main():
         history.save_snapshot(df.to_dict("records"))
         st.session_state["last_snap"] = datetime.now().strftime("%Y%m%d_%H%M")
 
-    # Stats
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Warnings", len(df))
-    c2.metric("Moderate", len(df[df["Status"] == "Moderate"]))
-    c3.metric("Minor", len(df[df["Status"] == "Minor"]))
-    c4.metric("Watch and Act", len(df[df["Warning Level"] == "Watch and Act"]))
+    # Stats - show counts for different types
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total", len(df))
+    c2.metric("Warnings", len(df[df["Source"] == "Warning"]) if "Source" in df.columns else 0)
+    c3.metric("Incidents", len(df[df["Source"] == "Incident"]) if "Source" in df.columns else 0)
+    c4.metric("Bushfire", len(df[df["Category"] == "Bushfire"]))
+    c5.metric("Other Types", len(df[df["Category"] != "Bushfire"]))
 
     # Tabs
-    tabs = st.tabs(["📍 Map", "📋 Warnings", "🏘️ By Postcode", "🔄 Compare", "📥 Download Log", "📜 History"])
+    tabs = st.tabs(["📍 Map", "📋 All Incidents", "🏘️ By Postcode", "🔄 Compare", "📥 Download Log", "📜 History"])
 
     # ===== TAB 1: MAP =====
     with tabs[0]:
-        st.subheader("Warning Map")
+        st.subheader("Incident & Warning Map")
+        st.markdown("**🔴 Large red markers = EMERGENCY WARNINGS - Take immediate action**")
         st_folium(create_map(df, geocoder), width=None, height=500, use_container_width=True)
-        st.markdown("**Legend:** 🟠 Moderate | 🟡 Minor")
+        st.markdown("**Legend:** 🔴 Emergency Warning | 🟠 Watch and Act | 🟡 Advice | 🔵 Flooding | ⚪ Other Incidents")
 
-    # ===== TAB 2: ALL WARNINGS =====
+    # ===== TAB 2: ALL INCIDENTS =====
     with tabs[1]:
-        st.subheader("All Warnings")
+        st.subheader("All Incidents & Warnings")
+        st.caption("Showing ALL emergency incidents and warnings. Use filters below to narrow down.")
 
-        # Multi-select filters
-        col1, col2, col3 = st.columns(3)
+        # Multi-select filters - add Source filter
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            sel_status = st.multiselect("Status", STATUS_OPTIONS, default=STATUS_OPTIONS, key="w_status")
+            source_options = ["Warning", "Incident"]
+            sel_source = st.multiselect("Source", source_options, default=source_options, key="w_source")
         with col2:
-            sel_level = st.multiselect("Warning Level", WARNING_LEVELS, default=WARNING_LEVELS, key="w_level")
+            sel_status = st.multiselect("Status", STATUS_OPTIONS, default=STATUS_OPTIONS, key="w_status")
         with col3:
+            sel_level = st.multiselect("Warning Level", WARNING_LEVELS, default=WARNING_LEVELS, key="w_level")
+        with col4:
             sel_cat = st.multiselect("Category", CATEGORIES, default=CATEGORIES, key="w_cat")
 
         filtered = df.copy()
+        if sel_source and "Source" in filtered.columns:
+            filtered = filtered[filtered["Source"].isin(sel_source)]
         if sel_status:
             filtered = filtered[filtered["Status"].isin(sel_status)]
         if sel_level:
             filtered = filtered[filtered["Warning Level"].isin(sel_level)]
         if sel_cat:
-            filtered = filtered[filtered["Category"].isin(sel_cat)]
+            # Filter by both Category and RawCategory to catch all matches
+            filtered = filtered[
+                filtered["Category"].isin(sel_cat) |
+                filtered["RawCategory"].isin(sel_cat)
+            ]
 
-        filtered = filtered.sort_values("Update Time", ascending=False)
+        # Sort by severity (warning level first, then status, then update time)
+        filtered["_level_order"] = filtered["Warning Level"].apply(get_level_order)
+        filtered["_status_order"] = filtered["Status"].apply(get_status_order)
+        filtered = filtered.sort_values(
+            ["_level_order", "_status_order", "Update Time"],
+            ascending=[True, True, False]
+        ).drop(columns=["_level_order", "_status_order"])
+
+        st.markdown(f"**Showing {len(filtered)} of {len(df)} total incidents/warnings (sorted by severity)**")
 
         st.dataframe(
-            filtered[["Warning Level", "Status", "Category", "Condition", "Location", "PostcodesStr", "Update Time"]],
+            filtered[["Source", "Warning Level", "Status", "Category", "Condition", "Location", "PostcodesStr", "Update Time"]],
             use_container_width=True, hide_index=True, height=400,
         )
 
