@@ -766,6 +766,16 @@ def main():
         if "cmp_mode" not in st.session_state:
             st.session_state.cmp_mode = None
 
+        # Initialize date/time defaults ONCE to prevent constant reruns
+        if "cmp_manual_date_init" not in st.session_state:
+            st.session_state.cmp_manual_date_init = datetime.now().date() - timedelta(days=1)
+        if "cmp_manual_time_init" not in st.session_state:
+            st.session_state.cmp_manual_time_init = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0).time()
+        if "cmp_end_date_init" not in st.session_state:
+            st.session_state.cmp_end_date_init = datetime.now().date()
+        if "cmp_end_time_init" not in st.session_state:
+            st.session_state.cmp_end_time_init = datetime.now().replace(second=0, microsecond=0).time()
+
         # Get download log times for quick selection
         log_entries = download_log.get_entries()
         log_times = [f"{e['timestamp'][:16]} ({e['initials']} - {e['report_type']})" for e in log_entries[:20]]
@@ -800,8 +810,8 @@ def main():
                 st.markdown("### Option 2: Manual Date/Time")
                 st.caption("Pick a custom start date and time")
 
-                manual_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=1), key="cmp_manual_date")
-                manual_time = st.time_input("Start Time", value=datetime.now().replace(hour=9, minute=0).time(), key="cmp_manual_time")
+                manual_date = st.date_input("Start Date", value=st.session_state.cmp_manual_date_init, key="cmp_manual_date")
+                manual_time = st.time_input("Start Time", value=st.session_state.cmp_manual_time_init, key="cmp_manual_time")
 
                 if st.button("Use This Mode", key="btn_mode2", type="primary" if st.session_state.cmp_mode == "manual" else "secondary"):
                     st.session_state.cmp_mode = "manual"
@@ -841,9 +851,9 @@ def main():
             st.markdown("**End Time (comparing to)**")
             ecol1, ecol2 = st.columns(2)
             with ecol1:
-                end_date = st.date_input("End Date", value=datetime.now().date(), key="cmp_end_date")
+                end_date = st.date_input("End Date", value=st.session_state.cmp_end_date_init, key="cmp_end_date")
             with ecol2:
-                end_time = st.time_input("End Time", value=datetime.now().time(), key="cmp_end_time")
+                end_time = st.time_input("End Time", value=st.session_state.cmp_end_time_init, key="cmp_end_time")
             end_dt = datetime.combine(end_date, end_time)
 
             st.markdown("---")
