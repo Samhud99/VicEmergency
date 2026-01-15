@@ -652,7 +652,7 @@ def main():
     with tabs[0]:
         st.subheader("Incident & Warning Map")
         st.markdown("**🔴 Large red markers = EMERGENCY WARNINGS - Take immediate action**")
-        st_folium(create_map(df, geocoder), width=None, height=500, use_container_width=True)
+        st_folium(create_map(df, geocoder), width=None, height=500, use_container_width=True, returned_objects=[])
         st.markdown("**Legend:** 🔴 Emergency Warning | 🟠 Watch and Act | 🟡 Advice | 🔵 Flooding | ⚪ Other Incidents")
 
     # ===== TAB 2: ALL INCIDENTS =====
