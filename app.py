@@ -637,13 +637,97 @@ def main():
         history.save_snapshot(df.to_dict("records"))
         st.session_state["last_snap"] = datetime.now().strftime("%Y%m%d_%H%M")
 
-    # Stats - show counts for different types
+    # ===== SIDEBAR FILTERS (Global) =====
+    with st.sidebar:
+        st.header("🔍 Filters")
+        st.caption("Set filters here, then navigate tabs freely")
+
+        # Initialize filter defaults in session state if not present
+        if "filter_source" not in st.session_state:
+            st.session_state.filter_source = ["Warning", "Incident"]
+        if "filter_status" not in st.session_state:
+            st.session_state.filter_status = STATUS_OPTIONS.copy()
+        if "filter_level" not in st.session_state:
+            st.session_state.filter_level = WARNING_LEVELS.copy()
+        if "filter_category" not in st.session_state:
+            st.session_state.filter_category = CATEGORIES.copy()
+
+        # Source filter
+        source_options = ["Warning", "Incident"]
+        sel_source = st.multiselect(
+            "Source",
+            source_options,
+            default=st.session_state.filter_source,
+            key="sidebar_source"
+        )
+        st.session_state.filter_source = sel_source
+
+        # Status filter
+        sel_status = st.multiselect(
+            "Status",
+            STATUS_OPTIONS,
+            default=st.session_state.filter_status,
+            key="sidebar_status"
+        )
+        st.session_state.filter_status = sel_status
+
+        # Warning Level filter
+        sel_level = st.multiselect(
+            "Warning Level",
+            WARNING_LEVELS,
+            default=st.session_state.filter_level,
+            key="sidebar_level"
+        )
+        st.session_state.filter_level = sel_level
+
+        # Category filter
+        sel_cat = st.multiselect(
+            "Category",
+            CATEGORIES,
+            default=st.session_state.filter_category,
+            key="sidebar_category"
+        )
+        st.session_state.filter_category = sel_cat
+
+        st.markdown("---")
+
+        # Reset filters button
+        if st.button("🔄 Reset All Filters", use_container_width=True):
+            st.session_state.filter_source = ["Warning", "Incident"]
+            st.session_state.filter_status = STATUS_OPTIONS.copy()
+            st.session_state.filter_level = WARNING_LEVELS.copy()
+            st.session_state.filter_category = CATEGORIES.copy()
+            st.rerun()
+
+    # ===== Apply Global Filters =====
+    filtered_df = df.copy()
+    if sel_source and "Source" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["Source"].isin(sel_source)]
+    if sel_status:
+        filtered_df = filtered_df[filtered_df["Status"].isin(sel_status)]
+    if sel_level:
+        filtered_df = filtered_df[filtered_df["Warning Level"].isin(sel_level)]
+    if sel_cat:
+        filtered_df = filtered_df[
+            filtered_df["Category"].isin(sel_cat) |
+            filtered_df["RawCategory"].isin(sel_cat)
+        ]
+
+    # Sort by severity
+    filtered_df["_level_order"] = filtered_df["Warning Level"].apply(get_level_order)
+    filtered_df["_status_order"] = filtered_df["Status"].apply(get_status_order)
+    filtered_df = filtered_df.sort_values(
+        ["_level_order", "_status_order", "Update Time"],
+        ascending=[True, True, False]
+    ).drop(columns=["_level_order", "_status_order"])
+
+    # Stats - show counts for filtered data
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total", len(df))
-    c2.metric("Warnings", len(df[df["Source"] == "Warning"]) if "Source" in df.columns else 0)
-    c3.metric("Incidents", len(df[df["Source"] == "Incident"]) if "Source" in df.columns else 0)
-    c4.metric("Bushfire", len(df[df["Category"] == "Bushfire"]))
-    c5.metric("Other Types", len(df[df["Category"] != "Bushfire"]))
+    c1.metric("Showing", f"{len(filtered_df)}/{len(df)}")
+    c2.metric("Warnings", len(filtered_df[filtered_df["Source"] == "Warning"]) if "Source" in filtered_df.columns else 0)
+    c3.metric("Incidents", len(filtered_df[filtered_df["Source"] == "Incident"]) if "Source" in filtered_df.columns else 0)
+    c4.metric("Bushfire", len(filtered_df[filtered_df["Category"] == "Bushfire"]))
+    c5.metric("Other Types", len(filtered_df[filtered_df["Category"] != "Bushfire"]))
 
     # Tabs
     tabs = st.tabs(["📍 Map", "📋 All Incidents", "🏘️ By Postcode", "🔄 Compare", "📥 Download Log", "📜 History"])
@@ -652,52 +736,19 @@ def main():
     with tabs[0]:
         st.subheader("Incident & Warning Map")
         st.markdown("**🔴 Large red markers = EMERGENCY WARNINGS - Take immediate action**")
-        st_folium(create_map(df, geocoder), width=None, height=500, use_container_width=True, returned_objects=[])
+        st.caption(f"Showing {len(filtered_df)} filtered incidents/warnings on map")
+        st_folium(create_map(filtered_df, geocoder), width=None, height=500, use_container_width=True, returned_objects=[])
         st.markdown("**Legend:** 🔴 Emergency Warning | 🟠 Watch and Act | 🟡 Advice | 🔵 Flooding | ⚪ Other Incidents")
 
     # ===== TAB 2: ALL INCIDENTS =====
     with tabs[1]:
         st.subheader("All Incidents & Warnings")
-        st.caption("Showing ALL emergency incidents and warnings. Use filters below to narrow down.")
+        st.caption("Use sidebar filters to narrow down results. Sorted by severity.")
 
-        # Multi-select filters - add Source filter
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            source_options = ["Warning", "Incident"]
-            sel_source = st.multiselect("Source", source_options, default=source_options, key="w_source")
-        with col2:
-            sel_status = st.multiselect("Status", STATUS_OPTIONS, default=STATUS_OPTIONS, key="w_status")
-        with col3:
-            sel_level = st.multiselect("Warning Level", WARNING_LEVELS, default=WARNING_LEVELS, key="w_level")
-        with col4:
-            sel_cat = st.multiselect("Category", CATEGORIES, default=CATEGORIES, key="w_cat")
-
-        filtered = df.copy()
-        if sel_source and "Source" in filtered.columns:
-            filtered = filtered[filtered["Source"].isin(sel_source)]
-        if sel_status:
-            filtered = filtered[filtered["Status"].isin(sel_status)]
-        if sel_level:
-            filtered = filtered[filtered["Warning Level"].isin(sel_level)]
-        if sel_cat:
-            # Filter by both Category and RawCategory to catch all matches
-            filtered = filtered[
-                filtered["Category"].isin(sel_cat) |
-                filtered["RawCategory"].isin(sel_cat)
-            ]
-
-        # Sort by severity (warning level first, then status, then update time)
-        filtered["_level_order"] = filtered["Warning Level"].apply(get_level_order)
-        filtered["_status_order"] = filtered["Status"].apply(get_status_order)
-        filtered = filtered.sort_values(
-            ["_level_order", "_status_order", "Update Time"],
-            ascending=[True, True, False]
-        ).drop(columns=["_level_order", "_status_order"])
-
-        st.markdown(f"**Showing {len(filtered)} of {len(df)} total incidents/warnings (sorted by severity)**")
+        st.markdown(f"**Showing {len(filtered_df)} of {len(df)} total incidents/warnings (sorted by severity)**")
 
         st.dataframe(
-            filtered[["Source", "Warning Level", "Status", "Category", "Condition", "Location", "PostcodesStr", "Update Time"]],
+            filtered_df[["Source", "Warning Level", "Status", "Category", "Condition", "Location", "PostcodesStr", "Update Time"]],
             use_container_width=True, hide_index=True, height=400,
         )
 
@@ -709,8 +760,8 @@ def main():
         with col_d2:
             if st.button("📥 Download Warnings", key="dl_warnings"):
                 if initials:
-                    csv = filtered.to_csv(index=False)
-                    download_log.add_entry(initials, "Warnings", f"Status: {sel_status}, Level: {sel_level}", len(filtered))
+                    csv = filtered_df.to_csv(index=False)
+                    download_log.add_entry(initials, "Warnings", f"Filtered: {len(filtered_df)} records", len(filtered_df))
                     st.download_button("Click to Download", csv, f"warnings_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv", key="dl_w_btn")
                 else:
                     st.warning("Please enter your initials")
@@ -718,20 +769,10 @@ def main():
     # ===== TAB 3: BY POSTCODE =====
     with tabs[2]:
         st.subheader("Warnings by Postcode")
+        st.caption("Use sidebar filters to narrow down results.")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            pc_status = st.multiselect("Status", STATUS_OPTIONS, default=STATUS_OPTIONS, key="pc_status")
-        with col2:
-            pc_cat = st.multiselect("Category", CATEGORIES, default=CATEGORIES, key="pc_cat")
-
-        pc_df = expand_by_postcode(df)
+        pc_df = expand_by_postcode(filtered_df)
         if not pc_df.empty:
-            if pc_status:
-                pc_df = pc_df[pc_df["Status"].isin(pc_status)]
-            if pc_cat:
-                pc_df = pc_df[pc_df["Category"].isin(pc_cat)]
-
             pc_df["StatusOrder"] = pc_df["Status"].apply(get_status_order)
             pc_df = pc_df.sort_values(["StatusOrder", "Postcode"]).drop_duplicates("Postcode", keep="first")
 
@@ -745,7 +786,7 @@ def main():
                 if st.button("📥 Download Postcodes", key="dl_pc"):
                     if init_pc:
                         csv = pc_df.to_csv(index=False)
-                        download_log.add_entry(init_pc, "Postcodes", f"Status: {pc_status}", len(pc_df))
+                        download_log.add_entry(init_pc, "Postcodes", f"Filtered: {len(pc_df)} postcodes", len(pc_df))
                         st.download_button("Click to Download", csv, f"postcodes_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv", key="dl_pc_btn")
                     else:
                         st.warning("Please enter initials")
@@ -858,15 +899,42 @@ def main():
 
             st.markdown("---")
 
-            # Filters for comparison results
+            # Filters for comparison results - use session state to persist
             st.markdown("**Filter Results**")
+
+            # Initialize comparison filter defaults in session state
+            if "cmp_filter_changes" not in st.session_state:
+                st.session_state.cmp_filter_changes = CHANGE_TYPES.copy()
+            if "cmp_filter_status" not in st.session_state:
+                st.session_state.cmp_filter_status = STATUS_OPTIONS + ["None"]
+            if "cmp_filter_cat" not in st.session_state:
+                st.session_state.cmp_filter_cat = CATEGORIES + [""]
+
             fcol1, fcol2, fcol3 = st.columns(3)
             with fcol1:
-                cmp_changes = st.multiselect("Change Type", CHANGE_TYPES, default=CHANGE_TYPES, key="cmp_changes")
+                cmp_changes = st.multiselect(
+                    "Change Type",
+                    CHANGE_TYPES,
+                    default=st.session_state.cmp_filter_changes,
+                    key="cmp_changes"
+                )
+                st.session_state.cmp_filter_changes = cmp_changes
             with fcol2:
-                cmp_status = st.multiselect("Status (End)", STATUS_OPTIONS + ["None"], default=STATUS_OPTIONS + ["None"], key="cmp_status")
+                cmp_status = st.multiselect(
+                    "Status (End)",
+                    STATUS_OPTIONS + ["None"],
+                    default=st.session_state.cmp_filter_status,
+                    key="cmp_status"
+                )
+                st.session_state.cmp_filter_status = cmp_status
             with fcol3:
-                cmp_cat = st.multiselect("Category", CATEGORIES + [""], default=CATEGORIES + [""], key="cmp_cat")
+                cmp_cat = st.multiselect(
+                    "Category",
+                    CATEGORIES + [""],
+                    default=st.session_state.cmp_filter_cat,
+                    key="cmp_cat"
+                )
+                st.session_state.cmp_filter_cat = cmp_cat
 
             # Run comparison button
             if st.button("🔄 Run Comparison", type="primary", use_container_width=True):
